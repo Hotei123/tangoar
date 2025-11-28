@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AR Footprint Stepper</title>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <!-- Official WebXR AR Button (Required for easy AR session entry) -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/webxr/ARButton.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Inter', sans-serif; }
+        canvas { display: block; }
+        /* The AR content is layered over the live camera feed */
+        #info-panel {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            padding: 1rem;
+            text-align: center;
+            color: #fff;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 10;
+        }
+        /* Style for the button injected by ARButton.js */
+        #ar-button {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 12px 24px;
+            background-color: #10b981; /* Tailwind green-500 */
+            color: white;
+            border: none;
+            border-radius: 9999px; /* Fully rounded */
+            cursor: pointer;
+            font-size: 1.125rem;
+            font-weight: 700;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            transition: background-color 0.2s;
+        }
+        #ar-button:hover { background-color: #059669; }
+        #reticle {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 20px;
+            height: 20px;
+            margin-top: -10px;
+            margin-left: -10px;
+            border: 2px solid white;
+            border-radius: 50%;
+            pointer-events: none;
+            z-index: 1000;
+            box-shadow: 0 0 5px rgba(255, 255, 255, 0.8);
+            background: rgba(255, 255, 255, 0.2);
+        }
+    </style>
+</head>
+<body>
+
+<div id="info-panel">
+    <h1 class="text-xl font-bold">AR Footprint Stepper</h1>
+    <p id="main-instruction">Tap the button below to enter AR. Point your phone at the floor until the reticle turns blue, then tap to place the footprints. <span class="text-yellow-400 font-semibold">Physically walk</span> over the green footprints to "step on" them!</p>
+    <p class="mt-2">Footprints Stepped: <span id="score">0</span> / 5</p>
+    <p id="ar-status" class="mt-2 text-sm font-semibold"></p>
+</div>
+<div id="reticle"></div>
+
+<script type="module">
+    // --- Global Variables ---
+    let camera, scene, renderer;
+    let reticle; // The object used for placing content
+    let hitTestSource = null;
+    let hitTestSourceInitialized = false;
+    let circles = [];
+    let score = 0;
+    const TOTAL_CIRCLES = 5;
+    const STEP_RANGE = 0.7; // Radius (in meters) around the circle center to count as a 'step'
+
+    // --- Scene Initialization ---
+    function init() {
+        // 1. Scene Setup
+        scene = new THREE.Scene();
+
+        // 2. Camera Setup (The camera remains static; the AR system moves its viewpoint)
+        camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+
+        // 3. Renderer Setup
+        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.xr.enabled = true; // Enable WebXR module
+        document.body.appendChild(renderer.domElement);
+        
+        // 4. Create the AR Reticle (used to find the floor)
+        createReticle();
+        
+        // 5. Add AR Button
+        // ARButton handles session entry and initial setup
+        const arButton = ARButton.createButton(renderer, { 
+            requiredFeatures: [ 'hit-test', 'dom-overlay' ],
+            optionalFeatures: [ 'dom-overlay-for-handheld-ar' ]
+        });
+        arButton.id = 'ar-button';
+        document.body.appendChild(arButton);
+        
+        // --- Diagnostic Check ---
+        const arStatusElement = document.getElementById('ar-status');
+        if (arButton.textContent.includes("START AR") || arButton.textContent.includes("ENTER AR")) {
+            arStatusElement.textContent = "AR session button successfully created (Look for the green button at the bottom).";
+            arStatusElement.classList.add('text-green-400');
+        } else {
+            // This happens if WebXR or 'immersive-ar' is not supported.
+            arStatusElement.innerHTML = "❌ ERROR: AR is likely **not supported** on this device/browser. Please ensure you are using a modern mobile phone (Android/iOS) with up-to-date browser (Chrome/Safari) that supports WebXR.";
+            arStatusElement.classList.add('text-red-400');
+            arStatusElement.classList.remove('text-green-400');
+        }
+
+
+        // 6. Event Listeners
+        window.addEventListener('resize', onWindowResize);
+        
+        // Listen for user interaction after AR session starts
+        renderer.domElement.addEventListener('click', onARClick); 
+        
+        // Start the animation loop
+        renderer.setAnimationLoop(animate);
+    }
+    
+    // --- Reticle Creation (for floor placement) ---
+    function createReticle() {
+        const geometry = new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI / 2);
+        const material = new THREE.MeshBasicMaterial({ color: 0xffffff });
+        reticle = new THREE.Mesh(geometry, material);
+        reticle.matrixAutoUpdate = false;
+        reticle.visible = false;
+        scene.add(reticle);
+    }
+    
+    // --- Circle Creation (The targets) ---
+    function createCircles(baseMatrix) {
+        // Remove reticle when circles are placed
+        reticle.visible = false;
+        if (scene.children.includes(reticle)) {
+             scene.remove(reticle);
+        }
+
+        const circleMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.8 });
+        const circleGeometry = new THREE.CircleGeometry(0.5, 32);
+
+        // Define positions relative to the placement anchor (0, 0, 0)
+        const relativePositions = [
+            { x: -2, z: -2 },
+            { x: 2, z: -2 },
+            { x: -2, z: 2 },
+            { x: 2, z: 2 },
+            { x: 0, z: 0 }
+        ];
+
+        relativePositions.forEach((pos, index) => {
+            const circle = new THREE.Mesh(circleGeometry, circleMaterial.clone());
+            circle.rotation.x = -Math.PI / 2; // Place flat on the floor
+            
+            // Apply the initial placement matrix to the circle's position
+            const offsetMatrix = new THREE.Matrix4().makeTranslation(pos.x, 0.01, pos.z);
+            circle.applyMatrix4(offsetMatrix);
+            circle.applyMatrix4(baseMatrix); // Apply the anchor matrix (real-world position)
+
+            circle.userData = { id: index, active: true, initialColor: circle.material.color.getHex() };
+            scene.add(circle);
+            circles.push(circle);
+        });
+    }
+
+    // --- AR Session Click Listener ---
+    function onARClick(event) {
+        // If the circles haven't been placed, use the click to place them
+        if (circles.length === 0 && reticle.visible) {
+            // Get the reticle's calculated matrix (where the floor was found)
+            const placementMatrix = reticle.matrix.clone();
+            createCircles(placementMatrix);
+            document.getElementById('main-instruction').innerHTML = 'Footprints placed! <span class="text-yellow-400 font-semibold">Physically walk</span> over the green footprints to step on them!';
+            document.getElementById('ar-status').textContent = "Game started. Move your phone over the circles.";
+        }
+    }
+
+    // --- Game Logic: Check for Physical Step ---
+    const cameraPosition = new THREE.Vector3();
+    const circlePosition = new THREE.Vector3();
+
+    function checkForSteps() {
+        if (circles.length === 0) return;
+
+        // Get the current real-world position of the camera (phone)
+        camera.getWorldPosition(cameraPosition);
+
+        circles.forEach(circle => {
+            if (!circle.userData.active) return;
+
+            // Get the real-world position of the circle on the floor
+            circle.getWorldPosition(circlePosition);
+            
+            // Check the 2D distance (X and Z coordinates) between the phone and the circle
+            const distance = Math.sqrt(
+                Math.pow(cameraPosition.x - circlePosition.x, 2) +
+                Math.pow(cameraPosition.z - circlePosition.z, 2)
+            );
+
+            // If the camera (phone) is within the 'step range' (0.7 meters)
+            if (distance < STEP_RANGE) {
+                // Register the step!
+                circle.userData.active = false;
+                circle.material.color.set(0x3333ff); // Change color to blue (stepped)
+                
+                score++;
+                document.getElementById('score').textContent = score;
+
+                // Check for win condition
+                if (score >= TOTAL_CIRCLES) {
+                    document.getElementById('info-panel').innerHTML = '<h1 class="text-3xl font-bold text-green-400">SUCCESS! All Footprints Stepped!</h1><p>Game complete. You successfully walked over all the virtual footprints!</p>';
+                }
+            }
+        });
+    }
+
+    // --- AR Hit Test (Finding the floor) ---
+    function updateHitTest(frame) {
+        if (reticle.visible && circles.length === 0) {
+            const referenceSpace = renderer.xr.getReferenceSpace();
+            const session = renderer.xr.getSession();
+
+            if (hitTestSourceInitialized === false) {
+                // Initialize hit test source once
+                session.requestReferenceSpace('viewer').then(referenceSpace => {
+                    session.requestHitTestSource({ space: referenceSpace }).then(source => {
+                        hitTestSource = source;
+                        hitTestSourceInitialized = true;
+                    });
+                });
+            }
+
+            if (hitTestSource) {
+                const hitTestResults = frame.getHitTestResults(hitTestSource);
+
+                if (hitTestResults.length > 0) {
+                    const hit = hitTestResults[0];
+                    const pose = hit.getPose(referenceSpace);
+
+                    // Update reticle position and rotation
+                    reticle.matrix.fromArray(pose.transform.matrix);
+                    reticle.visible = true;
+                    reticle.material.color.set(0x3333ff); // Blue when target is found
+                } else {
+                    reticle.visible = false;
+                }
+            }
+        }
+    }
+
+    // --- Main Loop ---
+    function animate(time, frame) {
+        if (frame) {
+            updateHitTest(frame); // Update reticle if in placement mode
+            checkForSteps(); // Check if the user's phone position is over a circle
+        }
+        renderer.render(scene, camera);
+    }
+
+    // --- Utility ---
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    // Initialize the whole thing
+    init();
+
+</script>
+
+</body>
+</html>
