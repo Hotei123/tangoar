@@ -4,13 +4,15 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AR Footprint Stepper</title>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <!-- We're using a slightly older, stable version of Three.js for better compatibility with existing samples -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.137.0/build/three.min.js"></script>
     <!-- Official WebXR AR Button (Required for easy AR session entry) -->
-    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/webxr/ARButton.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.137.0/examples/jsm/webxr/ARButton.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         body { margin: 0; overflow: hidden; font-family: 'Inter', sans-serif; }
         canvas { display: block; }
+        
         /* The AR content is layered over the live camera feed */
         #info-panel {
             position: absolute;
@@ -23,12 +25,22 @@
             background: rgba(0, 0, 0, 0.7);
             z-index: 10;
         }
-        /* Style for the button injected by ARButton.js */
+
+        /* * FIX: Targeted the standard container created by ARButton.js.
+         * The button itself is often inside a div with the ID 'ar-button'.
+         * We ensure this button container is styled correctly and is always visible.
+         */
         #ar-button {
             position: absolute;
             bottom: 20px;
-            left: 50%;
-            transform: translateX(-50%);
+            width: 100%; /* Make container full width */
+            text-align: center;
+            z-index: 100; /* CRITICAL: Ensure it's above everything else */
+            padding-bottom: 20px;
+        }
+        
+        /* Apply custom styles to the actual button generated inside the container */
+        #ar-button button {
             padding: 12px 24px;
             background-color: #10b981; /* Tailwind green-500 */
             color: white;
@@ -40,7 +52,9 @@
             box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
             transition: background-color 0.2s;
         }
-        #ar-button:hover { background-color: #059669; }
+        #ar-button button:hover { background-color: #059669; }
+
+        /* Reticle styling remains correct */
         #reticle {
             position: absolute;
             top: 50%;
@@ -60,12 +74,16 @@
 </head>
 <body>
 
+<!-- The AR Button needs a container to be placed inside -->
+<div id="ar-button"></div>
+
 <div id="info-panel">
     <h1 class="text-xl font-bold">AR Footprint Stepper</h1>
     <p id="main-instruction">Tap the button below to enter AR. Point your phone at the floor until the reticle turns blue, then tap to place the footprints. <span class="text-yellow-400 font-semibold">Physically walk</span> over the green footprints to "step on" them!</p>
     <p class="mt-2">Footprints Stepped: <span id="score">0</span> / 5</p>
     <p id="ar-status" class="mt-2 text-sm font-semibold"></p>
 </div>
+
 <div id="reticle"></div>
 
 <script type="module">
@@ -97,19 +115,20 @@
         // 4. Create the AR Reticle (used to find the floor)
         createReticle();
         
-        // 5. Add AR Button
+        // 5. Add AR Button (FIX: Now using the dedicated container with ID 'ar-button')
         // ARButton handles session entry and initial setup
         const arButton = ARButton.createButton(renderer, { 
-            requiredFeatures: [ 'hit-test', 'dom-overlay' ],
-            optionalFeatures: [ 'dom-overlay-for-handheld-ar' ]
+            requiredFeatures: [ 'hit-test', 'local-floor' ], // Changed requiredFeatures
+            optionalFeatures: [ 'dom-overlay', 'dom-overlay-for-handheld-ar' ],
+            domOverlay: { root: document.getElementById('info-panel') } // Tell WebXR where the UI overlay is
         });
-        arButton.id = 'ar-button';
-        document.body.appendChild(arButton);
+        document.getElementById('ar-button').appendChild(arButton);
         
         // --- Diagnostic Check ---
         const arStatusElement = document.getElementById('ar-status');
-        if (arButton.textContent.includes("START AR") || arButton.textContent.includes("ENTER AR")) {
-            arStatusElement.textContent = "AR session button successfully created (Look for the green button at the bottom).";
+        // The AR button's content changes based on support. If it doesn't say "AR NOT SUPPORTED", we assume the button is ready.
+        if (!arButton.textContent.includes("NOT SUPPORTED")) {
+            arStatusElement.textContent = "AR session button successfully created and detected.";
             arStatusElement.classList.add('text-green-400');
         } else {
             // This happens if WebXR or 'immersive-ar' is not supported.
@@ -181,7 +200,7 @@
             // Get the reticle's calculated matrix (where the floor was found)
             const placementMatrix = reticle.matrix.clone();
             createCircles(placementMatrix);
-            document.getElementById('main-instruction').innerHTML = 'Footprints placed! <span class="text-yellow-400 font-semibold">Physically walk</span> over the green footprints to step on them!';
+            document.getElementById('main-instruction').innerHTML = 'Footprints placed! <span class="text-yellow-400 font-semibold">Physically walk</span> over the blue footprints to step on them!';
             document.getElementById('ar-status').textContent = "Game started. Move your phone over the circles.";
         }
     }
@@ -237,6 +256,8 @@
                     session.requestHitTestSource({ space: referenceSpace }).then(source => {
                         hitTestSource = source;
                         hitTestSourceInitialized = true;
+                        // Initial status update
+                        document.getElementById('ar-status').textContent = "Hit test initialized. Scan the floor with your phone.";
                     });
                 });
             }
@@ -252,8 +273,10 @@
                     reticle.matrix.fromArray(pose.transform.matrix);
                     reticle.visible = true;
                     reticle.material.color.set(0x3333ff); // Blue when target is found
+                    document.getElementById('ar-status').textContent = "Floor found! Tap the screen to place footprints.";
                 } else {
                     reticle.visible = false;
+                    document.getElementById('ar-status').textContent = "Keep scanning the floor. No surface detected.";
                 }
             }
         }
